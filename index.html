@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#111722" />
-  <title>Bob: Ghost Hunter — Combat Lab v0.2.1</title>
+  <title>Bob: Ghost Hunter — Combat Lab v0.2.2</title>
   <style>
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#0b0f16; }
     body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; touch-action:none; overscroll-behavior:none; }
@@ -524,7 +524,7 @@
         this.input.on('pointerdown', () => this.ensureAudio());
         this.cameras.main.scrollX = 0;
         this.cameras.main.scrollY = 0;
-        this.message('Combat Lab v0.2.1 — gun collision + weapon persistence fix', 2400);
+        this.message('Combat Lab v0.2.2 — jumpable damage pad tuning', 2400);
       }
 
       makeTextures() {
@@ -634,7 +634,7 @@
         });
 
         // J: damage pad visual.
-        this.damagePadVisual = this.add.rectangle(3860, 191, 78, 7, 0x9b3f4f, 0.85).setDepth(3);
+        this.damagePadVisual = this.add.rectangle(3860, 191, 48, 7, 0x9b3f4f, 0.85).setDepth(3);
         this.label(3823, 163, 'DAMAGE PAD 20 HP', 7, '#ffb3bd');
         this.label(4010, 163, 'BROCCOLI +30 HP', 7, '#bff59d');
       }
@@ -688,7 +688,8 @@
       }
 
       makeDamagePad() {
-        this.damagePad = this.add.rectangle(3860, 187, 78, 13, 0x000000, 0).setDepth(0);
+        // Slightly forgiving trigger: the damaging area is narrower than the visible pad.
+        this.damagePad = this.add.rectangle(3860, 187, 42, 13, 0x000000, 0).setDepth(0);
         this.physics.add.existing(this.damagePad, true);
       }
 
@@ -721,7 +722,7 @@
       }
 
       createHUD() {
-        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2.1', {
+        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2.2', {
           fontFamily:'monospace', fontSize:'8px', color:'#e7edf5', backgroundColor:'#101722cc', padding:{x:3,y:2}
         }).setScrollFactor(0).setDepth(1003);
 
