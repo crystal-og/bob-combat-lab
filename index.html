@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#111722" />
-  <title>Bob: Ghost Hunter — Combat Lab v0.2.3</title>
+  <title>Bob: Ghost Hunter — Combat Lab v0.2.4</title>
   <style>
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#0b0f16; }
     body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; touch-action:none; overscroll-behavior:none; }
@@ -524,7 +524,7 @@
         this.input.on('pointerdown', () => this.ensureAudio());
         this.cameras.main.scrollX = 0;
         this.cameras.main.scrollY = 0;
-        this.message('Combat Lab v0.2.3 — machete reach tuning', 2400);
+        this.message('Combat Lab v0.2.4 — compact touch controls', 2400);
       }
 
       makeTextures() {
@@ -694,35 +694,53 @@
       }
 
       createTouchUI() {
+        // v0.2.4: smaller visible controls for a clearer iPhone view.
+        // The invisible touch zones remain slightly larger than the art so the buttons
+        // are still comfortable to hit with a thumb.
         this.touchRects = {
-          left:   new Phaser.Geom.Rectangle(12, 154, 57, 50),
-          right:  new Phaser.Geom.Rectangle(71, 154, 57, 50),
-          action: new Phaser.Geom.Rectangle(252, 157, 54, 48),
-          jump:   new Phaser.Geom.Rectangle(309, 146, 65, 59),
-          wand:   new Phaser.Geom.Rectangle(258, 116, 48, 34)
+          left:   new Phaser.Geom.Rectangle(8, 158, 50, 46),
+          right:  new Phaser.Geom.Rectangle(58, 158, 50, 46),
+          action: new Phaser.Geom.Rectangle(270, 158, 48, 46),
+          jump:   new Phaser.Geom.Rectangle(319, 153, 57, 51),
+          wand:   new Phaser.Geom.Rectangle(272, 122, 46, 34)
         };
 
-        const makeBtn = (rect, label, alpha=0.38, size=12) => {
-          const r = this.add.rectangle(rect.x + rect.width/2, rect.y + rect.height/2, rect.width, rect.height, 0xe6eef8, alpha)
-            .setScrollFactor(0).setDepth(1000).setStrokeStyle(1, 0xffffff, 0.42);
-          const t = this.add.text(rect.x + rect.width/2, rect.y + rect.height/2, label, {
+        this.visualRects = {
+          left:   new Phaser.Geom.Rectangle(14, 166, 38, 32),
+          right:  new Phaser.Geom.Rectangle(64, 166, 38, 32),
+          action: new Phaser.Geom.Rectangle(276, 166, 36, 32),
+          jump:   new Phaser.Geom.Rectangle(326, 161, 43, 38),
+          wand:   new Phaser.Geom.Rectangle(278, 128, 34, 24)
+        };
+
+        const makeBtn = (rect, label, alpha=0.28, size=10) => {
+          const cx = rect.x + rect.width / 2;
+          const cy = rect.y + rect.height / 2;
+          const radius = Math.min(11, Math.floor(rect.height / 2));
+          const r = this.add.graphics({ x:cx, y:cy })
+            .setScrollFactor(0).setDepth(1000);
+          r.fillStyle(0xe6eef8, alpha);
+          r.fillRoundedRect(-rect.width/2, -rect.height/2, rect.width, rect.height, radius);
+          r.lineStyle(1, 0xffffff, 0.34);
+          r.strokeRoundedRect(-rect.width/2, -rect.height/2, rect.width, rect.height, radius);
+          const t = this.add.text(cx, cy, label, {
             fontFamily:'monospace', fontSize:`${size}px`, color:'#101722', fontStyle:'bold'
           }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
           return { r, t, alpha };
         };
         this.touchVisuals = {
-          left: makeBtn(this.touchRects.left, '◀'),
-          right: makeBtn(this.touchRects.right, '▶'),
-          action: makeBtn(this.touchRects.action, 'A', 0.34, 11),
-          jump: makeBtn(this.touchRects.jump, 'JUMP', 0.42, 12),
-          wand: makeBtn(this.touchRects.wand, 'WAND', 0.34, 9)
+          left: makeBtn(this.visualRects.left, '◀'),
+          right: makeBtn(this.visualRects.right, '▶'),
+          action: makeBtn(this.visualRects.action, 'A', 0.26, 9),
+          jump: makeBtn(this.visualRects.jump, 'JUMP', 0.32, 9),
+          wand: makeBtn(this.visualRects.wand, 'WAND', 0.26, 7)
         };
         this.touchVisuals.wand.r.setVisible(false);
         this.touchVisuals.wand.t.setVisible(false);
       }
 
       createHUD() {
-        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2.2', {
+        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2.4', {
           fontFamily:'monospace', fontSize:'8px', color:'#e7edf5', backgroundColor:'#101722cc', padding:{x:3,y:2}
         }).setScrollFactor(0).setDepth(1003);
 
