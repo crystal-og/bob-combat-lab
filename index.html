@@ -1,0 +1,1400 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#111722" />
+  <title>Bob: Ghost Hunter — Combat Lab v0.2</title>
+  <style>
+    html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#0b0f16; }
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; touch-action:none; overscroll-behavior:none; }
+    #shell {
+      position:fixed; inset:0;
+      padding-top:env(safe-area-inset-top);
+      padding-right:env(safe-area-inset-right);
+      padding-bottom:env(safe-area-inset-bottom);
+      padding-left:env(safe-area-inset-left);
+      box-sizing:border-box;
+      display:flex; align-items:center; justify-content:center;
+      background:#0b0f16;
+    }
+    #game { width:100%; height:100%; display:flex; align-items:center; justify-content:center; }
+    canvas { image-rendering:pixelated; image-rendering:crisp-edges; touch-action:none; }
+    .overlay {
+      position:fixed; inset:0; z-index:50; display:none;
+      align-items:center; justify-content:center; text-align:center;
+      background:#0b0f16; color:#f0f3f8;
+      padding:32px; box-sizing:border-box;
+      font-weight:800; letter-spacing:.08em;
+    }
+    .overlay .big { font-size:clamp(24px,7vw,48px); margin-bottom:16px; }
+    .overlay .small { font-size:clamp(12px,3vw,18px); opacity:.78; line-height:1.5; }
+    #resumeOverlay { cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div id="shell"><div id="game"></div></div>
+  <div id="rotateOverlay" class="overlay">
+    <div>
+      <div class="big">↻ ROTATE DEVICE</div>
+      <div class="small">Bob's Combat Lab is built for landscape play.</div>
+    </div>
+  </div>
+  <div id="resumeOverlay" class="overlay">
+    <div>
+      <div class="big">PAUSED</div>
+      <div class="small">Tap anywhere to resume the Combat Lab.</div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.90.0/dist/phaser.min.js"></script>
+  <script>
+  (() => {
+    'use strict';
+
+    const W = 384;
+    const H = 216;
+    const CHAMBER_W = 420;
+    const CHAMBERS = 10;
+    const WORLD_W = CHAMBER_W * CHAMBERS;
+    const WORLD_H = 260;
+    const FLOOR_Y = 195;
+
+    // Movement values are copied from the iPhone-tested Movement Lab v0.1.2.
+    const MOVE = Object.freeze({
+      NORMAL_MAX: 130,
+      GROUND_ACCEL: 900,
+      GROUND_DECEL: 1150,
+      REVERSE_ACCEL: 1250,
+      AIR_ACCEL: 650,
+      GRAVITY: 1200,
+      JUMP_V: -420,
+      SHORT_CUTOFF: -190,
+      FALL_MAX: 500,
+      COYOTE_MS: 110,
+      BUFFER_MS: 120,
+      BODY_W: 16,
+      BODY_H: 28,
+      STOMP_BOUNCE: -250
+    });
+
+    const COMBAT = Object.freeze({
+      MAX_HP: 100,
+      START_LIVES: 5,
+      IFRAME_MS: 1000,
+      KNOCKBACK_MS: 120,
+      KNOCKBACK_X: 150,
+      KNOCKBACK_Y: -210,
+
+      GUN_DAMAGE: 20,
+      GUN_CRIT: 0.10,
+      GUN_COOLDOWN: 220,
+      GUN_AMMO: 20,
+      GUN_SPEED: 270,
+
+      MACHETE_DAMAGE: 36,
+      MACHETE_CRIT: 0.15,
+      MACHETE_COOLDOWN: 300,
+      MACHETE_REACH: 26,
+      MACHETE_HEIGHT: 24,
+
+      STOMP_DAMAGE: 32,
+      STOMP_CRIT: 0.20,
+      MEGA_STOMP_DAMAGE: 16,
+      BRUISER_STOMP_STUN: 1200,
+
+      WAND_CRIT: 0.05,
+      CRIT_MULT: 1.25,
+
+      BROCCOLI_HEAL: 30
+    });
+
+    const ENEMY = Object.freeze({
+      drifter: { hp:32, contact:10 },
+      spitter: { hp:72, contact:14, projectile:14 },
+      bruiser: { hp:144, contact:20, charge:25 }
+    });
+
+    const clamp = Phaser.Math.Clamp;
+    const approach = (value, target, maxDelta) => {
+      if (value < target) return Math.min(value + maxDelta, target);
+      if (value > target) return Math.max(value - maxDelta, target);
+      return target;
+    };
+    const overlapBodies = (a, b) => {
+      if (!a || !b || !a.enable || !b.enable) return false;
+      return !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom);
+    };
+
+    class CombatEnemy extends Phaser.Physics.Arcade.Sprite {
+      constructor(scene, x, y, texture, cfg) {
+        super(scene, x, y, texture);
+        scene.add.existing(this);
+        scene.physics.add.existing(this);
+        this.sceneRef = scene;
+        this.kind = cfg.kind;
+        this.enemyClass = cfg.enemyClass;
+        this.maxHp = cfg.hp;
+        this.hp = cfg.hp;
+        this.contactDamage = cfg.contactDamage;
+        this.spawnX = x;
+        this.spawnY = y;
+        this.patrolMin = cfg.patrolMin;
+        this.patrolMax = cfg.patrolMax;
+        this.dir = cfg.dir || 1;
+        this.state = 'PATROL';
+        this.stateMs = 0;
+        this.aliveEnemy = true;
+        this.respawnTimer = null;
+        this.lastStompAt = -9999;
+        this.flashUntil = 0;
+        this.stunnedUntil = 0;
+        this.body.setMaxVelocity(220, 500);
+        this.setDepth(7);
+        this.setData('chamber', cfg.chamber);
+
+        const barW = cfg.barW || 24;
+        this.hpBarW = barW;
+        this.hpBg = scene.add.rectangle(x, y - 20, barW + 2, 4, 0x10151e, 0.85).setDepth(20);
+        this.hpFill = scene.add.rectangle(x - barW / 2, y - 20, barW, 2, 0x9eea98, 1).setOrigin(0, 0.5).setDepth(21);
+      }
+
+      setBodySize(w, h, ox, oy) {
+        this.body.setSize(w, h);
+        this.body.setOffset(ox, oy);
+        return this;
+      }
+
+      updateHpBar() {
+        if (!this.aliveEnemy) {
+          this.hpBg.setVisible(false);
+          this.hpFill.setVisible(false);
+          return;
+        }
+        this.hpBg.setVisible(true).setPosition(this.x, this.y - this.displayHeight / 2 - 7);
+        const ratio = clamp(this.hp / this.maxHp, 0, 1);
+        this.hpFill.setVisible(true);
+        this.hpFill.x = this.x - this.hpBarW / 2;
+        this.hpFill.y = this.y - this.displayHeight / 2 - 7;
+        this.hpFill.width = this.hpBarW * ratio;
+      }
+
+      takeDamage(amount, attackType, crit, now) {
+        if (!this.aliveEnemy || !this.body.enable) return false;
+        this.hp = Math.max(0, this.hp - amount);
+        this.flashUntil = now + (crit ? 130 : 75);
+        this.sceneRef.recordHit(this, attackType, amount, crit);
+        this.sceneRef.damagePopup(this.x, this.y - 12, amount, crit);
+        if (this.hp <= 0) this.die();
+        return true;
+      }
+
+      die() {
+        if (!this.aliveEnemy) return;
+        this.aliveEnemy = false;
+        this.setVelocity(0, 0);
+        this.body.enable = false;
+        this.setVisible(false);
+        this.hpBg.setVisible(false);
+        this.hpFill.setVisible(false);
+        this.sceneRef.ectoplasmBurst(this.x, this.y, this.enemyClass);
+        this.sceneRef.playTone(this.enemyClass === 'mega' ? 110 : 170, 0.08, 0.035, 'sine');
+        this.respawnTimer = this.sceneRef.time.delayedCall(1700, () => this.respawn());
+      }
+
+      respawn() {
+        if (this.respawnTimer) this.respawnTimer = null;
+        this.hp = this.maxHp;
+        this.aliveEnemy = true;
+        this.body.enable = true;
+        this.setVisible(true);
+        this.setActive(true);
+        this.body.reset(this.spawnX, this.spawnY);
+        this.setPosition(this.spawnX, this.spawnY);
+        this.setVelocity(0, 0);
+        this.state = 'PATROL';
+        this.stateMs = 0;
+        this.stunnedUntil = 0;
+        this.clearTint();
+        this.updateHpBar();
+      }
+
+      forceReset() {
+        if (this.respawnTimer) {
+          this.respawnTimer.remove(false);
+          this.respawnTimer = null;
+        }
+        this.respawn();
+      }
+
+      commonVisual(now) {
+        if (!this.aliveEnemy) return;
+        if (now < this.flashUntil) this.setTintFill(0xffffff);
+        else this.clearTint();
+        this.updateHpBar();
+      }
+    }
+
+    class Drifter extends CombatEnemy {
+      constructor(scene, x, chamber, minX, maxX) {
+        super(scene, x, 188, 'drifter', {
+          kind:'drifter', enemyClass:'simple', hp:ENEMY.drifter.hp, contactDamage:ENEMY.drifter.contact,
+          patrolMin:minX, patrolMax:maxX, chamber, barW:18
+        });
+        this.setBodySize(14, 14, 2, 2);
+        this.speed = 32;
+      }
+
+      labUpdate(now) {
+        if (!this.aliveEnemy) return;
+        const player = this.sceneRef.player;
+        if (Math.abs(player.x - this.x) > 360) {
+          this.setVelocityX(0);
+          this.commonVisual(now);
+          return;
+        }
+        if (this.x <= this.patrolMin + 2) this.dir = 1;
+        if (this.x >= this.patrolMax - 2) this.dir = -1;
+        this.setVelocityX(this.dir * this.speed);
+        this.commonVisual(now);
+      }
+    }
+
+    class Spitter extends CombatEnemy {
+      constructor(scene, x, chamber, minX, maxX) {
+        super(scene, x, 185, 'spitter', {
+          kind:'spitter', enemyClass:'advanced', hp:ENEMY.spitter.hp, contactDamage:ENEMY.spitter.contact,
+          patrolMin:minX, patrolMax:maxX, chamber, barW:22
+        });
+        this.setBodySize(16, 20, 2, 2);
+        this.speed = 22;
+        this.cooldown = 450;
+      }
+
+      labUpdate(now, deltaMs) {
+        if (!this.aliveEnemy) return;
+        const player = this.sceneRef.player;
+        const distance = Math.abs(player.x - this.x);
+        if (distance > 360) {
+          this.setVelocityX(0);
+          this.commonVisual(now);
+          return;
+        }
+
+        this.stateMs += deltaMs;
+        this.cooldown -= deltaMs;
+
+        if (this.state === 'CHARGE') {
+          this.setVelocityX(0);
+          if (now >= this.flashUntil) this.setTintFill(0xd678ff);
+          if (this.stateMs >= 600) {
+            this.sceneRef.fireSpit(this);
+            this.state = 'RECOVERY';
+            this.stateMs = 0;
+            this.cooldown = 1400;
+          }
+        } else if (this.state === 'RECOVERY') {
+          this.setVelocityX(0);
+          if (this.stateMs >= 300) {
+            this.state = 'PATROL';
+            this.stateMs = 0;
+          }
+        } else {
+          if (this.x <= this.patrolMin + 2) this.dir = 1;
+          if (this.x >= this.patrolMax - 2) this.dir = -1;
+          this.setVelocityX(this.dir * this.speed);
+          if (distance <= 205 && Math.abs(player.y - this.y) < 65 && this.cooldown <= 0) {
+            this.state = 'CHARGE';
+            this.stateMs = 0;
+            this.setVelocityX(0);
+          }
+        }
+
+        if (this.state !== 'CHARGE') this.commonVisual(now);
+        else {
+          if (now < this.flashUntil) this.setTintFill(0xffffff);
+          else this.setTintFill(0xd678ff);
+          this.updateHpBar();
+        }
+      }
+    }
+
+    class Bruiser extends CombatEnemy {
+      constructor(scene, x, chamber, minX, maxX) {
+        super(scene, x, 181, 'bruiser', {
+          kind:'bruiser', enemyClass:'mega', hp:ENEMY.bruiser.hp, contactDamage:ENEMY.bruiser.contact,
+          patrolMin:minX, patrolMax:maxX, chamber, barW:27
+        });
+        this.setBodySize(22, 28, 2, 2);
+        this.speed = 24;
+        this.cooldown = 700;
+        this.chargeDir = 1;
+      }
+
+      stompStun(now) {
+        this.stunnedUntil = now + COMBAT.BRUISER_STOMP_STUN;
+        this.state = 'STUNNED';
+        this.stateMs = 0;
+        this.setVelocityX(0);
+      }
+
+      labUpdate(now, deltaMs) {
+        if (!this.aliveEnemy) return;
+        const player = this.sceneRef.player;
+        const distance = Math.abs(player.x - this.x);
+        if (distance > 390) {
+          this.setVelocityX(0);
+          this.commonVisual(now);
+          return;
+        }
+
+        this.stateMs += deltaMs;
+        this.cooldown -= deltaMs;
+
+        if (this.state === 'STUNNED') {
+          this.setVelocityX(0);
+          this.setTintFill(0xb6d9ff);
+          if (now >= this.stunnedUntil) {
+            this.state = 'PATROL';
+            this.stateMs = 0;
+            this.cooldown = 850;
+            this.clearTint();
+          }
+          this.updateHpBar();
+          return;
+        }
+
+        if (this.state === 'TELEGRAPH') {
+          this.setVelocityX(0);
+          this.setTintFill(0xff9a75);
+          if (this.stateMs >= 500) {
+            this.state = 'CHARGE';
+            this.stateMs = 0;
+            this.chargeDir = player.x >= this.x ? 1 : -1;
+            this.sceneRef.playTone(95, 0.08, 0.035, 'sawtooth');
+          }
+          this.updateHpBar();
+          return;
+        }
+
+        if (this.state === 'CHARGE') {
+          this.clearTint();
+          this.setVelocityX(this.chargeDir * 175);
+          const hitBound = (this.chargeDir > 0 && this.x >= this.patrolMax - 10) || (this.chargeDir < 0 && this.x <= this.patrolMin + 10);
+          if (hitBound || this.stateMs >= 850) {
+            this.state = 'STUNNED';
+            this.stateMs = 0;
+            this.stunnedUntil = now + 1200;
+            this.setVelocityX(0);
+            this.sceneRef.cameras.main.shake(65, 0.004);
+          }
+          this.updateHpBar();
+          return;
+        }
+
+        if (this.x <= this.patrolMin + 2) this.dir = 1;
+        if (this.x >= this.patrolMax - 2) this.dir = -1;
+        this.setVelocityX(this.dir * this.speed);
+        if (distance <= 185 && Math.abs(player.y - this.y) < 55 && this.cooldown <= 0) {
+          this.state = 'TELEGRAPH';
+          this.stateMs = 0;
+          this.setVelocityX(0);
+        }
+        this.commonVisual(now);
+      }
+    }
+
+    class CombatLab extends Phaser.Scene {
+      constructor() {
+        super('CombatLab');
+        this.controls = { left:false, right:false, jump:false, action:false, wand:false };
+        this.prevControls = { jump:false, action:false, wand:false };
+        this.coyote = 9999;
+        this.jumpBuffer = 9999;
+        this.lastFacing = 1;
+        this.airJumpReady = false;
+        this.stompLockUntil = 0;
+        this.hp = COMBAT.MAX_HP;
+        this.lives = COMBAT.START_LIVES;
+        this.invulnUntil = 0;
+        this.knockbackUntil = 0;
+        this.weapon = 'none';
+        this.gunAmmo = 0;
+        this.hasWand = false;
+        this.attackCooldownUntil = 0;
+        this.swingId = 0;
+        this.macheteActiveUntil = 0;
+        this.contactGraceUntil = 0;
+        this.critMode = 'NORMAL';
+        this.lastHit = '—';
+        this.lastEnemy = '—';
+        this.debugVisible = true;
+        this.hitboxesVisible = false;
+        this.currentChamber = 0;
+        this.padNextDamage = 0;
+        this.messageUntil = 0;
+        this.audioCtx = null;
+      }
+
+      create() {
+        this.physics.world.setBounds(0, 0, WORLD_W, WORLD_H);
+        this.cameras.main.setBounds(0, 0, WORLD_W, WORLD_H);
+        this.physics.world.gravity.y = MOVE.GRAVITY;
+        this.input.addPointer(5);
+
+        this.makeTextures();
+        this.drawBackground();
+
+        this.solids = this.physics.add.staticGroup();
+        this.oneWays = this.physics.add.staticGroup();
+        this.buildLab();
+
+        this.enemies = this.add.group();
+        this.gunBullets = this.physics.add.group({ allowGravity:false });
+        this.spitBullets = this.physics.add.group({ allowGravity:false });
+        this.pickups = this.physics.add.group({ allowGravity:false, immovable:true });
+
+        this.player = this.physics.add.sprite(70, 150, 'bob_lab');
+        this.player.setDepth(10);
+        this.player.body.setSize(MOVE.BODY_W, MOVE.BODY_H);
+        this.player.body.setOffset(4, 4);
+        this.player.body.setMaxVelocity(MOVE.NORMAL_MAX, MOVE.FALL_MAX);
+        this.player.setCollideWorldBounds(false);
+
+        this.physics.add.collider(this.player, this.solids);
+        this.physics.add.collider(
+          this.player,
+          this.oneWays,
+          undefined,
+          (player, platform) => {
+            const b = player.body;
+            if (b.velocity.y < 0) return false;
+            const prevBottom = b.prev.y + b.height;
+            const top = platform.body.y;
+            return prevBottom <= top + 7;
+          },
+          this
+        );
+
+        this.spawnLabEnemies();
+        this.physics.add.collider(this.enemies, this.solids);
+        this.physics.add.overlap(this.gunBullets, this.enemies, this.onGunBulletHit, undefined, this);
+        this.physics.add.overlap(this.player, this.pickups, this.onPickup, undefined, this);
+        this.physics.add.overlap(this.player, this.spitBullets, this.onSpitHit, undefined, this);
+        this.physics.add.collider(this.gunBullets, this.solids, bullet => bullet.destroy());
+        this.physics.add.collider(this.spitBullets, this.solids, bullet => bullet.destroy());
+
+        this.spawnPickups();
+        this.makeDamagePad();
+
+        this.keys = this.input.keyboard.addKeys({
+          left: Phaser.Input.Keyboard.KeyCodes.LEFT,
+          leftA: Phaser.Input.Keyboard.KeyCodes.A,
+          right: Phaser.Input.Keyboard.KeyCodes.RIGHT,
+          rightD: Phaser.Input.Keyboard.KeyCodes.D,
+          jump: Phaser.Input.Keyboard.KeyCodes.SPACE,
+          jumpZ: Phaser.Input.Keyboard.KeyCodes.Z,
+          action: Phaser.Input.Keyboard.KeyCodes.X,
+          wand: Phaser.Input.Keyboard.KeyCodes.C,
+          reset: Phaser.Input.Keyboard.KeyCodes.R,
+          gun: Phaser.Input.Keyboard.KeyCodes.ONE,
+          machete: Phaser.Input.Keyboard.KeyCodes.TWO,
+          giveWand: Phaser.Input.Keyboard.KeyCodes.THREE,
+          health: Phaser.Input.Keyboard.KeyCodes.H,
+          crit: Phaser.Input.Keyboard.KeyCodes.K,
+          boxes: Phaser.Input.Keyboard.KeyCodes.F2,
+          debug: Phaser.Input.Keyboard.KeyCodes.F3
+        });
+
+        this.createTouchUI();
+        this.createHUD();
+        this.createDebugBoxes();
+
+        this.input.keyboard.on('keydown-R', () => this.resetRoom(true));
+        this.input.keyboard.on('keydown-ONE', () => this.giveGun());
+        this.input.keyboard.on('keydown-TWO', () => this.giveMachete());
+        this.input.keyboard.on('keydown-THREE', () => this.giveWand());
+        this.input.keyboard.on('keydown-H', () => this.restoreHp());
+        this.input.keyboard.on('keydown-K', () => this.cycleCritMode());
+        this.input.keyboard.on('keydown-F2', () => this.toggleHitboxes());
+        this.input.keyboard.on('keydown-F3', () => this.toggleDebug());
+
+        this.input.on('pointerdown', () => this.ensureAudio());
+        this.cameras.main.scrollX = 0;
+        this.cameras.main.scrollY = 0;
+        this.message('Combat Lab v0.2 — movement values preserved from v0.1.2', 2400);
+      }
+
+      makeTextures() {
+        if (this.textures.exists('bob_lab')) return;
+        let g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0x2d394b, 1); g.fillRect(4, 14, 16, 15);
+        g.fillStyle(0x6f4a30, 1); g.fillRect(5, 0, 14, 6);
+        g.fillStyle(0xd8ad7d, 1); g.fillRect(6, 5, 12, 10);
+        g.fillStyle(0x101820, 1); g.fillRect(8, 8, 2, 2); g.fillRect(14, 8, 2, 2);
+        g.fillStyle(0x16202c, 1); g.fillRect(3, 14, 4, 12);
+        g.fillStyle(0x1a2230, 1); g.fillRect(5, 28, 5, 4); g.fillRect(14, 28, 5, 4);
+        g.generateTexture('bob_lab', 24, 32); g.destroy();
+
+        g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0xd9ffff, 1); g.fillCircle(9, 8, 7);
+        g.fillStyle(0xb9f6f5, 1); g.fillTriangle(3, 10, 8, 18, 11, 10); g.fillTriangle(8, 11, 13, 18, 16, 10);
+        g.fillStyle(0x233044, 1); g.fillRect(5, 6, 2, 2); g.fillRect(11, 6, 2, 2);
+        g.generateTexture('drifter', 18, 18); g.destroy();
+
+        g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0xbe78df, 1); g.fillEllipse(10, 10, 18, 18);
+        g.fillStyle(0x8b54b5, 1); g.fillTriangle(3, 13, 8, 24, 11, 13); g.fillTriangle(9, 13, 14, 24, 17, 13);
+        g.fillStyle(0x25182f, 1); g.fillRect(5, 7, 2, 2); g.fillRect(13, 7, 2, 2);
+        g.fillStyle(0x25182f, 1); g.fillRect(7, 12, 6, 3);
+        g.generateTexture('spitter', 20, 24); g.destroy();
+
+        g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0x6d3a75, 1); g.fillRoundedRect(2, 4, 22, 23, 7);
+        g.fillStyle(0x87465b, 1); g.fillRect(0, 9, 5, 13); g.fillRect(21, 9, 5, 13);
+        g.fillStyle(0x3a203e, 1); g.fillTriangle(4, 24, 9, 32, 12, 24); g.fillTriangle(14, 24, 18, 32, 23, 24);
+        g.fillStyle(0xffd8a6, 1); g.fillRect(7, 10, 3, 3); g.fillRect(16, 10, 3, 3);
+        g.generateTexture('bruiser', 26, 32); g.destroy();
+
+        g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0x9df2ff, 1); g.fillRect(0, 1, 7, 2); g.fillStyle(0xffffff, 1); g.fillRect(5, 0, 2, 4);
+        g.generateTexture('gun_bullet', 7, 4); g.destroy();
+
+        g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0xbff36b, 1); g.fillCircle(4, 4, 4); g.fillStyle(0x6acb56, 1); g.fillCircle(3, 3, 2);
+        g.generateTexture('spit_bullet', 8, 8); g.destroy();
+
+        g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0x6ed7ef, 1); g.fillRect(1, 4, 16, 5); g.fillStyle(0xd7f8ff, 1); g.fillRect(14, 2, 4, 3); g.fillStyle(0x46576d, 1); g.fillRect(3, 9, 5, 4);
+        g.generateTexture('pickup_gun', 18, 13); g.destroy();
+
+        g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0xe6e8ef, 1); g.fillTriangle(1, 4, 17, 1, 7, 7); g.fillStyle(0x9a6b3f, 1); g.fillRect(5, 6, 4, 7);
+        g.generateTexture('pickup_machete', 18, 13); g.destroy();
+
+        g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0xceb6ff, 1); g.fillRect(5, 1, 4, 15); g.fillStyle(0xffffff, 1); g.fillCircle(7, 3, 4); g.fillStyle(0xffe483, 1); g.fillRect(4, 15, 6, 3);
+        g.generateTexture('pickup_wand', 14, 18); g.destroy();
+
+        g = this.make.graphics({ x:0, y:0, add:false });
+        g.fillStyle(0x58b83d, 1); g.fillCircle(5, 5, 4); g.fillCircle(10, 5, 4); g.fillCircle(7, 3, 4); g.fillStyle(0x9ee16f, 1); g.fillCircle(7, 6, 3); g.fillStyle(0x4a8738, 1); g.fillRect(6, 8, 3, 6);
+        g.generateTexture('broccoli', 15, 14); g.destroy();
+      }
+
+      drawBackground() {
+        this.cameras.main.setBackgroundColor('#151d29');
+        const g = this.add.graphics().setDepth(-20);
+        for (let i = 0; i < CHAMBERS; i++) {
+          g.fillStyle(i % 2 === 0 ? 0x172231 : 0x1a2636, 0.55);
+          g.fillRect(i * CHAMBER_W, 0, CHAMBER_W, H);
+        }
+        g.lineStyle(1, 0x243144, 0.35);
+        for (let x = 0; x <= WORLD_W; x += 16) g.lineBetween(x, 0, x, H);
+        for (let y = 0; y <= H; y += 16) g.lineBetween(0, y, WORLD_W, y);
+        g.lineStyle(2, 0x607c9a, 0.45);
+        for (let x = CHAMBER_W; x < WORLD_W; x += CHAMBER_W) g.lineBetween(x, 28, x, FLOOR_Y);
+      }
+
+      addSolid(x, yTop, width, height=24, color=0x52657c) {
+        const r = this.add.rectangle(x + width/2, yTop + height/2, width, height, color).setOrigin(0.5);
+        this.physics.add.existing(r, true);
+        this.solids.add(r);
+        return r;
+      }
+
+      label(x, y, text, size=9, tint='#d6e2f0') {
+        return this.add.text(x, y, text, { fontFamily:'monospace', fontSize:`${size}px`, color:tint, backgroundColor:'#101722aa', padding:{x:3,y:2} }).setDepth(2);
+      }
+
+      buildLab() {
+        this.addSolid(0, FLOOR_Y, WORLD_W, 32);
+        const titles = [
+          ['A', 'DRIFTER + STOMP'],
+          ['B', 'STOMP JUMP CHAIN'],
+          ['C', 'GHOST GUN — DRIFTER / SPITTER'],
+          ['D', 'MACHETE — DRIFTER / SPITTER'],
+          ['E', 'BRUISER — STOMP / DODGE'],
+          ['F', 'GHOST GUN vs BRUISER'],
+          ['G', 'MACHETE vs BRUISER'],
+          ['H', 'MIXED ENCOUNTER'],
+          ['I', 'SPECTRAL WAND'],
+          ['J', 'HP + BROCCOLI TEST']
+        ];
+        titles.forEach((entry, i) => {
+          const x = i * CHAMBER_W + 16;
+          this.label(x, 74, `${entry[0]}  ${entry[1]}`, 9, '#e9f2ff');
+          this.label(x, 90, `CHAMBER ${i + 1}/10`, 7, '#7891ab');
+        });
+
+        // B: subtle visual markers for stomp chaining.
+        [525, 610, 695].forEach(x => {
+          this.add.rectangle(x, 190, 30, 3, 0x567795, 0.6).setDepth(1);
+        });
+
+        // J: damage pad visual.
+        this.damagePadVisual = this.add.rectangle(3860, 191, 78, 7, 0x9b3f4f, 0.85).setDepth(3);
+        this.label(3823, 163, 'DAMAGE PAD 20 HP', 7, '#ffb3bd');
+        this.label(4010, 163, 'BROCCOLI +30 HP', 7, '#bff59d');
+      }
+
+      spawnLabEnemies() {
+        const add = e => { this.enemies.add(e); return e; };
+
+        add(new Drifter(this, 230, 0, 150, 345));
+
+        add(new Drifter(this, 525, 1, 495, 550));
+        add(new Drifter(this, 610, 1, 580, 635));
+        add(new Drifter(this, 695, 1, 665, 720));
+
+        add(new Drifter(this, 1030, 2, 990, 1080));
+        add(new Spitter(this, 1185, 2, 1135, 1235));
+
+        add(new Drifter(this, 1450, 3, 1410, 1500));
+        add(new Spitter(this, 1600, 3, 1550, 1650));
+
+        add(new Bruiser(this, 1905, 4, 1770, 2055));
+        add(new Bruiser(this, 2325, 5, 2190, 2470));
+        add(new Bruiser(this, 2745, 6, 2610, 2890));
+
+        add(new Drifter(this, 3050, 7, 3015, 3090));
+        add(new Spitter(this, 3170, 7, 3130, 3215));
+        add(new Bruiser(this, 3295, 7, 3235, 3335));
+
+        add(new Drifter(this, 3475, 8, 3440, 3510));
+        add(new Spitter(this, 3580, 8, 3540, 3625));
+        add(new Bruiser(this, 3695, 8, 3650, 3745));
+      }
+
+      spawnPickups() {
+        this.createPickup(900, 176, 'pickup_gun', 'gun', 2);
+        this.createPickup(1320, 176, 'pickup_machete', 'machete', 3);
+        this.createPickup(2160, 176, 'pickup_gun', 'gun', 5);
+        this.createPickup(2580, 176, 'pickup_machete', 'machete', 6);
+        this.createPickup(3395, 174, 'pickup_wand', 'wand', 8);
+        this.createPickup(4040, 178, 'broccoli', 'broccoli', 9);
+      }
+
+      createPickup(x, y, texture, kind, chamber) {
+        const p = this.physics.add.sprite(x, y, texture).setDepth(6);
+        p.body.setAllowGravity(false);
+        p.setImmovable(true);
+        p.setData('kind', kind);
+        p.setData('chamber', chamber);
+        p.setData('respawnMs', kind === 'broccoli' ? 3200 : 2200);
+        this.pickups.add(p);
+        return p;
+      }
+
+      makeDamagePad() {
+        this.damagePad = this.add.rectangle(3860, 187, 78, 13, 0x000000, 0).setDepth(0);
+        this.physics.add.existing(this.damagePad, true);
+      }
+
+      createTouchUI() {
+        this.touchRects = {
+          left:   new Phaser.Geom.Rectangle(12, 154, 57, 50),
+          right:  new Phaser.Geom.Rectangle(71, 154, 57, 50),
+          action: new Phaser.Geom.Rectangle(252, 157, 54, 48),
+          jump:   new Phaser.Geom.Rectangle(309, 146, 65, 59),
+          wand:   new Phaser.Geom.Rectangle(258, 116, 48, 34)
+        };
+
+        const makeBtn = (rect, label, alpha=0.38, size=12) => {
+          const r = this.add.rectangle(rect.x + rect.width/2, rect.y + rect.height/2, rect.width, rect.height, 0xe6eef8, alpha)
+            .setScrollFactor(0).setDepth(1000).setStrokeStyle(1, 0xffffff, 0.42);
+          const t = this.add.text(rect.x + rect.width/2, rect.y + rect.height/2, label, {
+            fontFamily:'monospace', fontSize:`${size}px`, color:'#101722', fontStyle:'bold'
+          }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+          return { r, t, alpha };
+        };
+        this.touchVisuals = {
+          left: makeBtn(this.touchRects.left, '◀'),
+          right: makeBtn(this.touchRects.right, '▶'),
+          action: makeBtn(this.touchRects.action, 'A', 0.34, 11),
+          jump: makeBtn(this.touchRects.jump, 'JUMP', 0.42, 12),
+          wand: makeBtn(this.touchRects.wand, 'WAND', 0.34, 9)
+        };
+        this.touchVisuals.wand.r.setVisible(false);
+        this.touchVisuals.wand.t.setVisible(false);
+      }
+
+      createHUD() {
+        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2', {
+          fontFamily:'monospace', fontSize:'8px', color:'#e7edf5', backgroundColor:'#101722cc', padding:{x:3,y:2}
+        }).setScrollFactor(0).setDepth(1003);
+
+        this.hpBack = this.add.rectangle(8, 24, 104, 8, 0x17202d, 0.95).setOrigin(0,0.5).setScrollFactor(0).setDepth(1002);
+        this.hpFill = this.add.rectangle(10, 24, 100, 4, 0x75d56f, 1).setOrigin(0,0.5).setScrollFactor(0).setDepth(1003);
+        this.hpText = this.add.text(115, 18, '', { fontFamily:'monospace', fontSize:'7px', color:'#e7edf5' }).setScrollFactor(0).setDepth(1003);
+
+        this.weaponText = this.add.text(6, 32, '', { fontFamily:'monospace', fontSize:'7px', color:'#d6e2f0', backgroundColor:'#101722bb', padding:{x:3,y:2} }).setScrollFactor(0).setDepth(1003);
+        this.lastHitText = this.add.text(6, 47, '', { fontFamily:'monospace', fontSize:'7px', color:'#a9bdd1', backgroundColor:'#101722aa', padding:{x:3,y:2} }).setScrollFactor(0).setDepth(1003);
+
+        this.messageText = this.add.text(W/2, 68, '', { fontFamily:'monospace', fontSize:'8px', color:'#fff5bf', backgroundColor:'#101722dd', padding:{x:5,y:3}, align:'center' }).setOrigin(0.5,0).setScrollFactor(0).setDepth(1005).setVisible(false);
+
+        const makeDev = (x, label, cb, width=36) => {
+          const t = this.add.text(x, 5, label, { fontFamily:'monospace', fontSize:'7px', color:'#dce9f5', backgroundColor:'#26364acc', padding:{x:4,y:3}, align:'center', fixedWidth:width })
+            .setOrigin(0,0).setScrollFactor(0).setDepth(1004).setInteractive({useHandCursor:true});
+          t.on('pointerdown', () => { this.ensureAudio(); cb(); });
+          return t;
+        };
+        this.devHp = makeDev(146, 'HP', () => this.restoreHp(), 30);
+        this.devGun = makeDev(178, 'GUN', () => this.giveGun(), 38);
+        this.devMachete = makeDev(218, 'MACH', () => this.giveMachete(), 42);
+        this.devWand = makeDev(262, 'WAND', () => this.giveWand(), 43);
+        this.devCrit = makeDev(307, 'CRIT:N', () => this.cycleCritMode(), 48);
+        this.devReset = makeDev(357, 'RST', () => this.resetRoom(true), 27);
+
+        this.boxButton = this.add.text(307, 24, 'BOX', { fontFamily:'monospace', fontSize:'7px', color:'#aabdd0', backgroundColor:'#26364aaa', padding:{x:4,y:2} })
+          .setScrollFactor(0).setDepth(1004).setInteractive({useHandCursor:true});
+        this.boxButton.on('pointerdown', () => this.toggleHitboxes());
+
+        this.debugText = this.add.text(376, 35, '', { fontFamily:'monospace', fontSize:'6px', color:'#93a8bd', backgroundColor:'#0d131daa', padding:{x:3,y:2}, align:'right' })
+          .setOrigin(1,0).setScrollFactor(0).setDepth(1003);
+      }
+
+      createDebugBoxes() {
+        this.debugGraphics = this.add.graphics().setScrollFactor(1).setDepth(999);
+      }
+
+      ensureAudio() {
+        try {
+          if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
+        } catch (e) { /* Audio is optional in the lab. */ }
+      }
+
+      playTone(freq, seconds=0.05, volume=0.025, type='square') {
+        if (!this.audioCtx || this.audioCtx.state !== 'running') return;
+        const o = this.audioCtx.createOscillator();
+        const g = this.audioCtx.createGain();
+        o.type = type;
+        o.frequency.value = freq;
+        g.gain.value = volume;
+        o.connect(g); g.connect(this.audioCtx.destination);
+        const now = this.audioCtx.currentTime;
+        g.gain.setValueAtTime(volume, now);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + seconds);
+        o.start(now); o.stop(now + seconds);
+      }
+
+      message(text, ms=1200) {
+        this.messageText.setText(text).setVisible(true);
+        this.messageUntil = this.time.now + ms;
+      }
+
+      restoreHp() {
+        this.hp = COMBAT.MAX_HP;
+        this.message('HP RESTORED — 100/100', 850);
+      }
+
+      giveGun() {
+        this.weapon = 'gun';
+        this.gunAmmo = COMBAT.GUN_AMMO;
+        this.message('PRIMARY: GHOST GUN — 20 SHOTS', 900);
+      }
+
+      giveMachete() {
+        this.weapon = 'machete';
+        this.gunAmmo = 0;
+        this.message('PRIMARY: MACHETE — UNLIMITED', 900);
+      }
+
+      giveWand() {
+        this.hasWand = true;
+        this.message('SPECIAL: SPECTRAL WAND — ONE USE', 1000);
+      }
+
+      cycleCritMode() {
+        this.critMode = this.critMode === 'NORMAL' ? 'OFF' : (this.critMode === 'OFF' ? 'FORCE' : 'NORMAL');
+        this.devCrit.setText(this.critMode === 'NORMAL' ? 'CRIT:N' : (this.critMode === 'OFF' ? 'CRIT:0' : 'CRIT:!'));
+        this.message(`CRITICALS: ${this.critMode}`, 750);
+      }
+
+      toggleHitboxes() {
+        this.hitboxesVisible = !this.hitboxesVisible;
+        this.boxButton.setColor(this.hitboxesVisible ? '#fff1a8' : '#aabdd0');
+      }
+
+      toggleDebug() {
+        this.debugVisible = !this.debugVisible;
+        this.debugText.setVisible(this.debugVisible);
+      }
+
+      rollCrit(type) {
+        const chance = type === 'gun' ? COMBAT.GUN_CRIT : type === 'machete' ? COMBAT.MACHETE_CRIT : type === 'stomp' ? COMBAT.STOMP_CRIT : COMBAT.WAND_CRIT;
+        if (this.critMode === 'OFF') return false;
+        if (this.critMode === 'FORCE') return true;
+        return Math.random() < chance;
+      }
+
+      recordHit(enemy, type, amount, crit) {
+        this.lastEnemy = `${enemy.kind.toUpperCase()} ${enemy.hp}/${enemy.maxHp}`;
+        this.lastHit = `${type.toUpperCase()} ${amount}${crit ? ' CRIT' : ''}`;
+        this.playTone(crit ? 720 : 190, crit ? 0.07 : 0.04, crit ? 0.04 : 0.025, crit ? 'square' : 'sine');
+        if (crit) this.cameras.main.flash(55, 255, 245, 170, false);
+      }
+
+      damagePopup(x, y, amount, crit) {
+        const t = this.add.text(x, y, `${crit ? 'CRIT ' : ''}-${amount}`, { fontFamily:'monospace', fontSize:crit ? '8px' : '7px', color:crit ? '#fff0a8' : '#ffffff', backgroundColor:'#101722aa', padding:{x:2,y:1} }).setOrigin(0.5).setDepth(30);
+        this.tweens.add({ targets:t, y:y-12, alpha:0, duration:520, onComplete:() => t.destroy() });
+      }
+
+      ectoplasmBurst(x, y, enemyClass) {
+        const count = enemyClass === 'mega' ? 13 : 8;
+        for (let i = 0; i < count; i++) {
+          const p = this.add.rectangle(x, y, 2, 2, enemyClass === 'mega' ? 0xb266c7 : 0xbaf8f5, 0.95).setDepth(25);
+          const dx = Phaser.Math.Between(-16,16);
+          const dy = Phaser.Math.Between(-16,4);
+          this.tweens.add({ targets:p, x:x+dx, y:y+dy, alpha:0, duration:Phaser.Math.Between(260,520), onComplete:() => p.destroy() });
+        }
+      }
+
+      onPickup(player, pickup) {
+        if (!pickup.active || !pickup.body.enable) return;
+        const kind = pickup.getData('kind');
+        if (kind === 'gun') this.giveGun();
+        else if (kind === 'machete') this.giveMachete();
+        else if (kind === 'wand') this.giveWand();
+        else if (kind === 'broccoli') {
+          if (this.hp >= COMBAT.MAX_HP) {
+            this.message('BROCCOLI — HP ALREADY FULL', 700);
+            return;
+          }
+          const before = this.hp;
+          this.hp = Math.min(COMBAT.MAX_HP, this.hp + COMBAT.BROCCOLI_HEAL);
+          this.message(`BROCCOLI +${this.hp - before} HP`, 850);
+          this.playTone(310, 0.05, 0.03, 'square');
+        }
+        pickup.disableBody(true, true);
+        this.time.delayedCall(pickup.getData('respawnMs'), () => {
+          if (!pickup || !pickup.scene) return;
+          pickup.enableBody(true, pickup.x, pickup.y, true, true);
+        });
+      }
+
+      fireSpit(spitter) {
+        if (!spitter.aliveEnemy) return;
+        const dir = this.player.x >= spitter.x ? 1 : -1;
+        const b = this.spitBullets.create(spitter.x + dir * 11, spitter.y - 2, 'spit_bullet');
+        b.body.setAllowGravity(false);
+        b.setVelocityX(dir * 95);
+        b.setData('damage', ENEMY.spitter.projectile);
+        b.setData('expires', this.time.now + 2600);
+        this.playTone(135, 0.06, 0.02, 'triangle');
+      }
+
+      onSpitHit(player, bullet) {
+        if (!bullet.active) return;
+        const damage = bullet.getData('damage') || ENEMY.spitter.projectile;
+        bullet.destroy();
+        this.damageBob(damage, bullet.x);
+      }
+
+      onGunBulletHit(bullet, enemy) {
+        if (!bullet.active || !enemy.aliveEnemy) return;
+        bullet.destroy();
+        const crit = this.rollCrit('gun');
+        const amount = Math.round(COMBAT.GUN_DAMAGE * (crit ? COMBAT.CRIT_MULT : 1));
+        enemy.takeDamage(amount, 'gun', crit, this.time.now);
+      }
+
+      fireGun() {
+        if (this.time.now < this.attackCooldownUntil) return;
+        if (this.gunAmmo <= 0) {
+          this.attackCooldownUntil = this.time.now + 240;
+          this.message('GHOST GUN EMPTY', 450);
+          this.playTone(80, 0.03, 0.02, 'square');
+          return;
+        }
+        this.attackCooldownUntil = this.time.now + COMBAT.GUN_COOLDOWN;
+        this.gunAmmo--;
+        const dir = this.lastFacing;
+        const bullet = this.gunBullets.create(this.player.x + dir * 15, this.player.y - 2, 'gun_bullet');
+        bullet.body.setAllowGravity(false);
+        bullet.setVelocityX(dir * COMBAT.GUN_SPEED);
+        bullet.setData('expires', this.time.now + 1200);
+        bullet.setFlipX(dir < 0);
+        this.playTone(430, 0.035, 0.025, 'square');
+        const flash = this.add.rectangle(this.player.x + dir * 15, this.player.y - 2, 5, 5, 0xd8fbff, 0.9).setDepth(20);
+        this.tweens.add({ targets:flash, alpha:0, duration:80, onComplete:()=>flash.destroy() });
+      }
+
+      swingMachete() {
+        if (this.time.now < this.attackCooldownUntil) return;
+        this.attackCooldownUntil = this.time.now + COMBAT.MACHETE_COOLDOWN;
+        this.swingId++;
+        this.macheteActiveUntil = this.time.now + 95;
+        this.playTone(245, 0.055, 0.02, 'sawtooth');
+
+        const dir = this.lastFacing;
+        const cx = this.player.x + dir * (COMBAT.MACHETE_REACH * 0.55 + 8);
+        const cy = this.player.y - 1;
+        const hitRect = {
+          left: cx - COMBAT.MACHETE_REACH / 2,
+          right: cx + COMBAT.MACHETE_REACH / 2,
+          top: cy - COMBAT.MACHETE_HEIGHT / 2,
+          bottom: cy + COMBAT.MACHETE_HEIGHT / 2
+        };
+
+        let target = null;
+        let nearest = Infinity;
+        this.enemies.getChildren().forEach(enemy => {
+          if (!enemy.aliveEnemy || !enemy.body.enable) return;
+          if (!(enemy.body.right <= hitRect.left || enemy.body.left >= hitRect.right || enemy.body.bottom <= hitRect.top || enemy.body.top >= hitRect.bottom)) {
+            const d = Math.abs(enemy.x - this.player.x);
+            if (d < nearest) { nearest = d; target = enemy; }
+          }
+        });
+
+        const slash = this.add.rectangle(cx, cy, 24, 5, 0xe8edf3, 0.8).setAngle(dir > 0 ? -25 : 25).setDepth(22);
+        this.tweens.add({ targets:slash, angle:dir > 0 ? 35 : -35, alpha:0, duration:130, onComplete:()=>slash.destroy() });
+
+        if (target) {
+          const crit = this.rollCrit('machete');
+          let amount = Math.round(COMBAT.MACHETE_DAMAGE * (crit ? COMBAT.CRIT_MULT : 1));
+          // Simple ghosts are intentionally always lethal to a clean machete hit.
+          if (target.enemyClass === 'simple') amount = Math.max(amount, target.hp);
+          if (target.takeDamage(amount, 'machete', crit, this.time.now)) {
+            this.contactGraceUntil = this.time.now + 90;
+          }
+        }
+      }
+
+      useWand() {
+        if (!this.hasWand) return;
+        const view = this.cameras.main.worldView;
+        const targets = this.enemies.getChildren().filter(e => e.aliveEnemy && e.x >= view.x - 4 && e.x <= view.right + 4 && e.y >= view.y - 10 && e.y <= view.bottom + 10);
+        if (!targets.length) {
+          this.message('WAND: NO GHOSTS ON SCREEN', 650);
+          return;
+        }
+        this.hasWand = false;
+        this.cameras.main.flash(180, 245, 245, 255, false);
+        this.cameras.main.shake(110, 0.006);
+        this.playTone(105, 0.12, 0.035, 'sawtooth');
+        this.time.delayedCall(70, () => this.playTone(720, 0.16, 0.025, 'square'));
+        targets.forEach((enemy, index) => {
+          this.time.delayedCall(index * 35, () => {
+            if (!enemy.aliveEnemy) return;
+            const crit = this.rollCrit('wand');
+            let base;
+            if (enemy.enemyClass === 'simple' || enemy.enemyClass === 'advanced') base = enemy.maxHp;
+            else base = enemy.maxHp * 0.5;
+            const amount = Math.round(base * (crit ? COMBAT.CRIT_MULT : 1));
+            const bolt = this.add.rectangle(enemy.x, enemy.y - 55, 3, 95, 0xf3f0ff, 0.95).setDepth(35);
+            const glow = this.add.rectangle(enemy.x, enemy.y - 20, 9, 95, 0xb99cff, 0.28).setDepth(34);
+            this.tweens.add({ targets:[bolt, glow], alpha:0, duration:180, onComplete:()=>{ bolt.destroy(); glow.destroy(); } });
+            enemy.takeDamage(amount, 'wand', crit, this.time.now);
+          });
+        });
+      }
+
+      handleStompAndContact(now) {
+        if (now < this.stompLockUntil) return;
+        const pb = this.player.body;
+        const prevBottom = pb.prev.y + pb.height;
+
+        for (const enemy of this.enemies.getChildren()) {
+          if (!enemy.aliveEnemy || !enemy.body.enable) continue;
+          if (!overlapBodies(pb, enemy.body)) continue;
+
+          const descending = pb.velocity.y > 35;
+          const topTolerance = enemy.enemyClass === 'mega' ? 10 : 9;
+          const cameFromAbove = prevBottom <= enemy.body.top + topTolerance;
+          const horizontallyCentered = this.player.x > enemy.body.left - 7 && this.player.x < enemy.body.right + 7;
+
+          if (descending && cameFromAbove && horizontallyCentered) {
+            const base = enemy.enemyClass === 'mega' ? COMBAT.MEGA_STOMP_DAMAGE : COMBAT.STOMP_DAMAGE;
+            const crit = this.rollCrit('stomp');
+            const amount = Math.round(base * (crit ? COMBAT.CRIT_MULT : 1));
+            enemy.takeDamage(amount, 'stomp', crit, now);
+            if (enemy.enemyClass === 'mega' && enemy.aliveEnemy && enemy.stompStun) enemy.stompStun(now);
+
+            this.player.body.position.y = enemy.body.top - this.player.body.height - 1;
+            this.player.body.velocity.y = MOVE.STOMP_BOUNCE;
+            this.airJumpReady = true;
+            this.jumpBuffer = 9999;
+            this.coyote = 9999;
+            this.stompLockUntil = now + 110;
+            this.contactGraceUntil = now + 120;
+            this.playTone(crit ? 620 : 155, 0.055, 0.03, 'square');
+            return;
+          }
+
+          if (now < this.contactGraceUntil || now < this.invulnUntil) return;
+          let damage = enemy.contactDamage;
+          if (enemy.kind === 'bruiser' && enemy.state === 'CHARGE') damage = ENEMY.bruiser.charge;
+          this.damageBob(damage, enemy.x);
+          return;
+        }
+      }
+
+      damageBob(amount, sourceX) {
+        const now = this.time.now;
+        if (now < this.invulnUntil) return false;
+        this.hp = Math.max(0, this.hp - amount);
+        this.invulnUntil = now + COMBAT.IFRAME_MS;
+        this.knockbackUntil = now + COMBAT.KNOCKBACK_MS;
+        const dir = this.player.x >= sourceX ? 1 : -1;
+        this.player.setVelocity(dir * COMBAT.KNOCKBACK_X, COMBAT.KNOCKBACK_Y);
+        this.cameras.main.shake(70, 0.005);
+        this.playTone(90, 0.08, 0.035, 'square');
+        this.message(`BOB -${amount} HP`, 520);
+        if (this.hp <= 0) this.loseLife();
+        return true;
+      }
+
+      loseLife() {
+        this.lives--;
+        const chamber = this.currentChamber;
+        this.player.body.enable = false;
+        this.player.setAlpha(0.35);
+        const ghost = this.add.rectangle(this.player.x, this.player.y - 8, 8, 12, 0xdafcff, 0.75).setDepth(25);
+        this.tweens.add({ targets:ghost, y:ghost.y-24, alpha:0, duration:420, onComplete:()=>ghost.destroy() });
+        if (this.lives <= 0) {
+          this.message('RUN OVER — FIVE HEARTS SPENT — RESET TO CHAMBER A', 1600);
+          this.time.delayedCall(650, () => {
+            this.lives = COMBAT.START_LIVES;
+            this.currentChamber = 0;
+            this.respawnPlayerAt(0);
+            this.resetAllEnemies();
+          });
+        } else {
+          this.message(`HEART LOST — ${this.lives} REMAIN`, 1100);
+          this.time.delayedCall(520, () => {
+            this.respawnPlayerAt(chamber);
+            this.resetEnemiesInChamber(chamber);
+          });
+        }
+      }
+
+      respawnPlayerAt(chamber) {
+        this.hp = COMBAT.MAX_HP;
+        this.invulnUntil = this.time.now + 500;
+        this.knockbackUntil = 0;
+        this.airJumpReady = false;
+        this.coyote = 0;
+        this.jumpBuffer = 9999;
+        const x = chamber * CHAMBER_W + 48;
+        this.player.body.enable = true;
+        this.player.setAlpha(1);
+        this.player.body.reset(x, 150);
+        this.player.setPosition(x, 150);
+        this.player.setVelocity(0, 0);
+        this.cameras.main.scrollX = clamp(x - 80, 0, WORLD_W - W);
+      }
+
+      resetEnemiesInChamber(chamber) {
+        this.enemies.getChildren().forEach(e => { if (e.getData('chamber') === chamber) e.forceReset(); });
+        this.clearProjectiles();
+      }
+
+      resetAllEnemies() {
+        this.enemies.getChildren().forEach(e => e.forceReset());
+        this.clearProjectiles();
+      }
+
+      resetRoom(restoreHealth=false) {
+        if (restoreHealth) this.hp = COMBAT.MAX_HP;
+        this.respawnPlayerAt(this.currentChamber);
+        this.resetEnemiesInChamber(this.currentChamber);
+        this.message(`CHAMBER ${String.fromCharCode(65 + this.currentChamber)} RESET`, 650);
+      }
+
+      clearProjectiles() {
+        this.gunBullets.clear(true, true);
+        this.spitBullets.clear(true, true);
+      }
+
+      readTouch() {
+        const touch = { left:false, right:false, jump:false, action:false, wand:false };
+        const pointers = this.input.manager.pointers;
+        for (let i=0; i<pointers.length; i++) {
+          const p = pointers[i];
+          if (!p || !p.isDown) continue;
+          const x = p.x;
+          const y = p.y;
+          if (Phaser.Geom.Rectangle.Contains(this.touchRects.left, x, y)) touch.left = true;
+          if (Phaser.Geom.Rectangle.Contains(this.touchRects.right, x, y)) touch.right = true;
+          if (Phaser.Geom.Rectangle.Contains(this.touchRects.jump, x, y)) touch.jump = true;
+          if (Phaser.Geom.Rectangle.Contains(this.touchRects.action, x, y)) touch.action = true;
+          if (this.hasWand && Phaser.Geom.Rectangle.Contains(this.touchRects.wand, x, y)) touch.wand = true;
+        }
+        return touch;
+      }
+
+      updateTouchVisuals() {
+        for (const name of ['left','right','action','jump']) {
+          const v = this.touchVisuals[name];
+          const on = this.controls[name];
+          v.r.setAlpha(on ? 0.72 : v.alpha);
+          v.r.setScale(on ? 0.95 : 1);
+          v.t.setScale(on ? 0.95 : 1);
+        }
+        const w = this.touchVisuals.wand;
+        w.r.setVisible(this.hasWand);
+        w.t.setVisible(this.hasWand);
+        if (this.hasWand) {
+          w.r.setAlpha(this.controls.wand ? 0.76 : w.alpha);
+          w.r.setScale(this.controls.wand ? 0.95 : 1);
+          w.t.setScale(this.controls.wand ? 0.95 : 1);
+        }
+        this.touchVisuals.action.t.setText(this.weapon === 'gun' ? 'FIRE' : this.weapon === 'machete' ? 'SLASH' : 'A');
+      }
+
+      updateMovement(deltaMs, jumpPressed, jumpReleased) {
+        const dt = Math.min(deltaMs, 33.34) / 1000;
+        const now = this.time.now;
+        let dir = 0;
+        if (this.controls.left && !this.controls.right) dir = -1;
+        else if (this.controls.right && !this.controls.left) dir = 1;
+        else if (this.controls.left && this.controls.right) dir = this.lastFacing;
+        if (dir !== 0) this.lastFacing = dir;
+
+        const grounded = this.player.body.blocked.down || this.player.body.touching.down;
+        if (grounded) {
+          this.coyote = 0;
+          this.airJumpReady = false;
+          if (Math.abs(this.player.body.velocity.y) < 2) this.player.body.velocity.y = 0;
+        } else {
+          this.coyote += deltaMs;
+        }
+
+        if (jumpPressed) this.jumpBuffer = 0;
+        else this.jumpBuffer += deltaMs;
+
+        const vx = this.player.body.velocity.x;
+        let nextVx = vx;
+        if (now >= this.knockbackUntil) {
+          if (grounded) {
+            if (dir === 0) nextVx = approach(vx, 0, MOVE.GROUND_DECEL * dt);
+            else {
+              const target = dir * MOVE.NORMAL_MAX;
+              const reversing = Math.sign(vx) !== 0 && Math.sign(vx) !== dir;
+              nextVx = approach(vx, target, (reversing ? MOVE.REVERSE_ACCEL : MOVE.GROUND_ACCEL) * dt);
+            }
+          } else if (dir !== 0) {
+            nextVx = approach(vx, dir * MOVE.NORMAL_MAX, MOVE.AIR_ACCEL * dt);
+          }
+          this.player.body.setVelocityX(clamp(nextVx, -MOVE.NORMAL_MAX, MOVE.NORMAL_MAX));
+        }
+
+        let usedGroundJump = false;
+        if (this.jumpBuffer <= MOVE.BUFFER_MS && this.coyote <= MOVE.COYOTE_MS) {
+          this.player.body.setVelocityY(MOVE.JUMP_V);
+          this.jumpBuffer = 9999;
+          this.coyote = 9999;
+          usedGroundJump = true;
+        }
+
+        if (!usedGroundJump && jumpPressed && !grounded && this.airJumpReady) {
+          this.player.body.setVelocityY(MOVE.JUMP_V);
+          this.airJumpReady = false;
+          this.jumpBuffer = 9999;
+          this.coyote = 9999;
+          this.message('STOMP JUMP!', 360);
+          this.playTone(510, 0.045, 0.025, 'square');
+        }
+
+        if (jumpReleased && this.player.body.velocity.y < MOVE.SHORT_CUTOFF) this.player.body.setVelocityY(MOVE.SHORT_CUTOFF);
+        if (this.player.body.velocity.y > MOVE.FALL_MAX) this.player.body.setVelocityY(MOVE.FALL_MAX);
+
+        return { grounded, dir };
+      }
+
+      updateCombat(actionPressed, wandPressed) {
+        if (this.weapon === 'gun' && this.controls.action) this.fireGun();
+        else if (this.weapon === 'machete' && actionPressed) this.swingMachete();
+        if (wandPressed) this.useWand();
+      }
+
+      updateEnemies(time, deltaMs) {
+        this.enemies.getChildren().forEach(e => e.labUpdate(time, deltaMs));
+      }
+
+      updateProjectiles(time) {
+        this.gunBullets.getChildren().forEach(b => { if (b.active && time > (b.getData('expires') || 0)) b.destroy(); });
+        this.spitBullets.getChildren().forEach(b => { if (b.active && time > (b.getData('expires') || 0)) b.destroy(); });
+      }
+
+      updateDamagePad(time) {
+        if (overlapBodies(this.player.body, this.damagePad.body) && time >= this.padNextDamage) {
+          this.padNextDamage = time + 1050;
+          this.damageBob(20, this.player.x - 20);
+        }
+      }
+
+      updateChamber() {
+        const c = clamp(Math.floor(this.player.x / CHAMBER_W), 0, CHAMBERS - 1);
+        if (c !== this.currentChamber) {
+          const previous = this.currentChamber;
+          this.currentChamber = c;
+          // Chamber E is the clean Bruiser movement/stomp test: no primary weapon by default.
+          if (c === 4 && previous !== 4) {
+            this.weapon = 'none';
+            this.gunAmmo = 0;
+            this.message('CHAMBER E — PRIMARY CLEARED: STOMP / DODGE TEST', 900);
+          } else {
+            this.message(`CHAMBER ${String.fromCharCode(65+c)} — ${c+1}/10`, 650);
+          }
+        }
+      }
+
+      updateCamera(dt) {
+        const cam = this.cameras.main;
+        const screenXTarget = this.lastFacing > 0 ? 146 : 238;
+        let targetX = this.player.x - screenXTarget;
+        targetX = clamp(targetX, 0, WORLD_W - W);
+        const kx = 1 - Math.exp(-8 * dt);
+        cam.scrollX = Phaser.Math.Linear(cam.scrollX, targetX, kx);
+        cam.scrollY = 0;
+      }
+
+      updateHUD(time, grounded, dir) {
+        const hpRatio = clamp(this.hp / COMBAT.MAX_HP, 0, 1);
+        this.hpFill.width = 100 * hpRatio;
+        this.hpFill.setFillStyle(hpRatio > 0.55 ? 0x75d56f : hpRatio > 0.25 ? 0xe0c65b : 0xe46f6f, 1);
+        this.hpText.setText(`${this.hp}/100   ♥×${this.lives}`);
+        const primary = this.weapon === 'gun' ? `GUN ${this.gunAmmo}/20` : this.weapon === 'machete' ? 'MACHETE ∞' : 'UNARMED';
+        this.weaponText.setText(`PRIMARY ${primary}   WAND ${this.hasWand ? 'READY' : '—'}   STOMP-JUMP ${this.airJumpReady ? 'READY' : '—'}`);
+        this.lastHitText.setText(`LAST ${this.lastHit}   TARGET ${this.lastEnemy}`);
+        if (this.messageText.visible && time >= this.messageUntil) this.messageText.setVisible(false);
+
+        if (time < this.invulnUntil) this.player.setAlpha(Math.floor(time / 70) % 2 ? 0.35 : 1);
+        else this.player.setAlpha(1);
+
+        if (this.debugVisible) {
+          const b = this.player.body;
+          const state = grounded ? (Math.abs(b.velocity.x) > 8 ? 'RUN' : 'IDLE') : (b.velocity.y < 0 ? 'JUMP' : 'FALL');
+          const fps = Math.round(this.game.loop.actualFps || 0);
+          this.debugText.setText(`FPS ${fps}  ${state}\nX ${this.player.x.toFixed(0)} VX ${b.velocity.x.toFixed(0)} VY ${b.velocity.y.toFixed(0)}\nCRIT ${this.critMode}  CH ${String.fromCharCode(65+this.currentChamber)}`);
+        }
+      }
+
+      updateDebugBoxes() {
+        this.debugGraphics.clear();
+        if (!this.hitboxesVisible) return;
+        this.debugGraphics.lineStyle(1, 0x4cff6f, 0.9);
+        const p = this.player.body;
+        this.debugGraphics.strokeRect(p.x, p.y, p.width, p.height);
+        this.debugGraphics.lineStyle(1, 0xffd259, 0.9);
+        this.enemies.getChildren().forEach(e => {
+          if (e.aliveEnemy && e.body.enable) this.debugGraphics.strokeRect(e.body.x, e.body.y, e.body.width, e.body.height);
+        });
+        this.debugGraphics.lineStyle(1, 0x64d9ff, 0.9);
+        this.gunBullets.getChildren().forEach(b => { if (b.active && b.body) this.debugGraphics.strokeRect(b.body.x,b.body.y,b.body.width,b.body.height); });
+        this.spitBullets.getChildren().forEach(b => { if (b.active && b.body) this.debugGraphics.strokeRect(b.body.x,b.body.y,b.body.width,b.body.height); });
+      }
+
+      update(time, deltaMs) {
+        if (!this.player || !this.player.body || !this.player.body.enable) return;
+        const dt = Math.min(deltaMs, 33.34) / 1000;
+        const touch = this.readTouch();
+        this.controls.left = this.keys.left.isDown || this.keys.leftA.isDown || touch.left;
+        this.controls.right = this.keys.right.isDown || this.keys.rightD.isDown || touch.right;
+        this.controls.jump = this.keys.jump.isDown || this.keys.jumpZ.isDown || touch.jump;
+        this.controls.action = this.keys.action.isDown || touch.action;
+        this.controls.wand = this.keys.wand.isDown || touch.wand;
+
+        const jumpPressed = this.controls.jump && !this.prevControls.jump;
+        const jumpReleased = !this.controls.jump && this.prevControls.jump;
+        const actionPressed = this.controls.action && !this.prevControls.action;
+        const wandPressed = this.controls.wand && !this.prevControls.wand;
+        this.prevControls.jump = this.controls.jump;
+        this.prevControls.action = this.controls.action;
+        this.prevControls.wand = this.controls.wand;
+
+        const movement = this.updateMovement(deltaMs, jumpPressed, jumpReleased);
+        this.updateCombat(actionPressed, wandPressed);
+        this.updateEnemies(time, deltaMs);
+        this.updateProjectiles(time);
+        this.handleStompAndContact(time);
+        this.updateDamagePad(time);
+        this.updateChamber();
+
+        if (this.player.y > WORLD_H + 40 || this.player.x < -20 || this.player.x > WORLD_W + 20) this.resetRoom(true);
+
+        this.updateCamera(dt);
+        this.updateTouchVisuals();
+        this.updateHUD(time, movement.grounded, movement.dir);
+        this.updateDebugBoxes();
+      }
+    }
+
+    const config = {
+      type: Phaser.AUTO,
+      parent: 'game',
+      width: W,
+      height: H,
+      backgroundColor: '#151d29',
+      render: {
+        pixelArt: true,
+        antialias: false,
+        roundPixels: true,
+        powerPreference: 'high-performance'
+      },
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: W,
+        height: H
+      },
+      physics: {
+        default: 'arcade',
+        arcade: {
+          gravity: { y: 0 },
+          debug: false,
+          fps: 60
+        }
+      },
+      fps: {
+        target: 60,
+        forceSetTimeOut: false
+      },
+      scene: [CombatLab]
+    };
+
+    const game = new Phaser.Game(config);
+    const rotateOverlay = document.getElementById('rotateOverlay');
+    const resumeOverlay = document.getElementById('resumeOverlay');
+    let backgroundPaused = false;
+    let sleeping = false;
+
+    function setLoopSleeping(shouldSleep) {
+      if (!game || !game.loop) return;
+      if (shouldSleep && !sleeping) { game.loop.sleep(); sleeping = true; }
+      else if (!shouldSleep && sleeping) { game.loop.wake(); sleeping = false; }
+    }
+
+    function updateOrientation() {
+      const portrait = window.innerHeight > window.innerWidth;
+      rotateOverlay.style.display = portrait ? 'flex' : 'none';
+      if (portrait) setLoopSleeping(true);
+      else if (!backgroundPaused) setLoopSleeping(false);
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        backgroundPaused = true;
+        setLoopSleeping(true);
+      } else if (window.innerWidth >= window.innerHeight) {
+        resumeOverlay.style.display = 'flex';
+      }
+    });
+
+    resumeOverlay.addEventListener('pointerdown', () => {
+      backgroundPaused = false;
+      resumeOverlay.style.display = 'none';
+      updateOrientation();
+    });
+
+    window.addEventListener('resize', updateOrientation);
+    window.addEventListener('orientationchange', () => setTimeout(updateOrientation, 120));
+    updateOrientation();
+  })();
+  </script>
+</body>
+</html>
