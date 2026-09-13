@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#111722" />
-  <title>Bob: Ghost Hunter — Combat Lab v0.2.2</title>
+  <title>Bob: Ghost Hunter — Combat Lab v0.2.3</title>
   <style>
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#0b0f16; }
     body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; touch-action:none; overscroll-behavior:none; }
@@ -97,7 +97,7 @@
       MACHETE_DAMAGE: 36,
       MACHETE_CRIT: 0.15,
       MACHETE_COOLDOWN: 300,
-      MACHETE_REACH: 26,
+      MACHETE_REACH: 34,
       MACHETE_HEIGHT: 24,
 
       STOMP_DAMAGE: 32,
@@ -524,7 +524,7 @@
         this.input.on('pointerdown', () => this.ensureAudio());
         this.cameras.main.scrollX = 0;
         this.cameras.main.scrollY = 0;
-        this.message('Combat Lab v0.2.2 — jumpable damage pad tuning', 2400);
+        this.message('Combat Lab v0.2.3 — machete reach tuning', 2400);
       }
 
       makeTextures() {
@@ -953,7 +953,7 @@
           }
         });
 
-        const slash = this.add.rectangle(cx, cy, 24, 5, 0xe8edf3, 0.8).setAngle(dir > 0 ? -25 : 25).setDepth(22);
+        const slash = this.add.rectangle(cx, cy, 30, 5, 0xe8edf3, 0.8).setAngle(dir > 0 ? -25 : 25).setDepth(22);
         this.tweens.add({ targets:slash, angle:dir > 0 ? 35 : -35, alpha:0, duration:130, onComplete:()=>slash.destroy() });
 
         if (target) {
