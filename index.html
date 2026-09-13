@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#111722" />
-  <title>Bob: Ghost Hunter — Combat Lab v0.2</title>
+  <title>Bob: Ghost Hunter — Combat Lab v0.2.1</title>
   <style>
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#0b0f16; }
     body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; touch-action:none; overscroll-behavior:none; }
@@ -524,7 +524,7 @@
         this.input.on('pointerdown', () => this.ensureAudio());
         this.cameras.main.scrollX = 0;
         this.cameras.main.scrollY = 0;
-        this.message('Combat Lab v0.2 — movement values preserved from v0.1.2', 2400);
+        this.message('Combat Lab v0.2.1 — gun collision + weapon persistence fix', 2400);
       }
 
       makeTextures() {
@@ -721,7 +721,7 @@
       }
 
       createHUD() {
-        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2', {
+        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2.1', {
           fontFamily:'monospace', fontSize:'8px', color:'#e7edf5', backgroundColor:'#101722cc', padding:{x:3,y:2}
         }).setScrollFactor(0).setDepth(1003);
 
@@ -912,13 +912,16 @@
         this.attackCooldownUntil = this.time.now + COMBAT.GUN_COOLDOWN;
         this.gunAmmo--;
         const dir = this.lastFacing;
-        const bullet = this.gunBullets.create(this.player.x + dir * 15, this.player.y - 2, 'gun_bullet');
+        // Fire from Bob's lower torso so the shot intersects all Floor 1 ghost bodies,
+        // including the short Drifter. Keep bullets visually above enemies in the lab.
+        const muzzleY = this.player.y + 7;
+        const bullet = this.gunBullets.create(this.player.x + dir * 15, muzzleY, 'gun_bullet').setDepth(12);
         bullet.body.setAllowGravity(false);
         bullet.setVelocityX(dir * COMBAT.GUN_SPEED);
         bullet.setData('expires', this.time.now + 1200);
         bullet.setFlipX(dir < 0);
         this.playTone(430, 0.035, 0.025, 'square');
-        const flash = this.add.rectangle(this.player.x + dir * 15, this.player.y - 2, 5, 5, 0xd8fbff, 0.9).setDepth(20);
+        const flash = this.add.rectangle(this.player.x + dir * 15, muzzleY, 5, 5, 0xd8fbff, 0.9).setDepth(20);
         this.tweens.add({ targets:flash, alpha:0, duration:80, onComplete:()=>flash.destroy() });
       }
 
@@ -1216,7 +1219,18 @@
       }
 
       updateProjectiles(time) {
-        this.gunBullets.getChildren().forEach(b => { if (b.active && time > (b.getData('expires') || 0)) b.destroy(); });
+        // Explicitly verify gun/enemy body overlaps as a mobile-safe fallback.
+        // Phaser's overlap callback remains registered, but this prevents a missed
+        // group-overlap from allowing a visibly intersecting shot to pass through.
+        this.gunBullets.getChildren().slice().forEach(b => {
+          if (!b.active || !b.body) return;
+          if (time > (b.getData('expires') || 0)) { b.destroy(); return; }
+          for (const enemy of this.enemies.getChildren()) {
+            if (!b.active) break;
+            if (!enemy.aliveEnemy || !enemy.body || !enemy.body.enable) continue;
+            if (overlapBodies(b.body, enemy.body)) this.onGunBulletHit(b, enemy);
+          }
+        });
         this.spitBullets.getChildren().forEach(b => { if (b.active && time > (b.getData('expires') || 0)) b.destroy(); });
       }
 
@@ -1230,16 +1244,10 @@
       updateChamber() {
         const c = clamp(Math.floor(this.player.x / CHAMBER_W), 0, CHAMBERS - 1);
         if (c !== this.currentChamber) {
-          const previous = this.currentChamber;
           this.currentChamber = c;
-          // Chamber E is the clean Bruiser movement/stomp test: no primary weapon by default.
-          if (c === 4 && previous !== 4) {
-            this.weapon = 'none';
-            this.gunAmmo = 0;
-            this.message('CHAMBER E — PRIMARY CLEARED: STOMP / DODGE TEST', 900);
-          } else {
-            this.message(`CHAMBER ${String.fromCharCode(65+c)} — ${c+1}/10`, 650);
-          }
+          // Primary weapons persist through damage and ordinary chamber transitions.
+          // Chamber E can still be used as a stomp/dodge test simply by not attacking.
+          this.message(`CHAMBER ${String.fromCharCode(65+c)} — ${c+1}/10`, 650);
         }
       }
 
