@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#111722" />
-  <title>Bob: Ghost Hunter — Combat Lab v0.2.4</title>
+  <title>Bob: Ghost Hunter — Combat Lab v0.2.5</title>
   <style>
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#0b0f16; }
     body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; touch-action:none; overscroll-behavior:none; }
@@ -524,7 +524,7 @@
         this.input.on('pointerdown', () => this.ensureAudio());
         this.cameras.main.scrollX = 0;
         this.cameras.main.scrollY = 0;
-        this.message('Combat Lab v0.2.4 — compact touch controls', 2400);
+        this.message('Combat Lab v0.2.5 — improved critical-hit feedback', 2400);
       }
 
       makeTextures() {
@@ -695,6 +695,7 @@
 
       createTouchUI() {
         // v0.2.4: smaller visible controls for a clearer iPhone view.
+        // v0.2.5: larger, higher, longer-lived critical-hit popup feedback.
         // The invisible touch zones remain slightly larger than the art so the buttons
         // are still comfortable to hit with a thumb.
         this.touchRects = {
@@ -740,7 +741,7 @@
       }
 
       createHUD() {
-        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2.4', {
+        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2.5', {
           fontFamily:'monospace', fontSize:'8px', color:'#e7edf5', backgroundColor:'#101722cc', padding:{x:3,y:2}
         }).setScrollFactor(0).setDepth(1003);
 
@@ -857,8 +858,23 @@
       }
 
       damagePopup(x, y, amount, crit) {
-        const t = this.add.text(x, y, `${crit ? 'CRIT ' : ''}-${amount}`, { fontFamily:'monospace', fontSize:crit ? '8px' : '7px', color:crit ? '#fff0a8' : '#ffffff', backgroundColor:'#101722aa', padding:{x:2,y:1} }).setOrigin(0.5).setDepth(30);
-        this.tweens.add({ targets:t, y:y-12, alpha:0, duration:520, onComplete:() => t.destroy() });
+        const startY = crit ? y - 7 : y;
+        const t = this.add.text(x, startY, `${crit ? 'CRIT! ' : ''}-${amount}`, {
+          fontFamily:'monospace',
+          fontSize:crit ? '10px' : '7px',
+          color:crit ? '#fff0a8' : '#ffffff',
+          backgroundColor:'#101722aa',
+          padding:{x:crit ? 3 : 2,y:crit ? 2 : 1},
+          fontStyle:crit ? 'bold' : 'normal'
+        }).setOrigin(0.5).setDepth(30);
+        this.tweens.add({
+          targets:t,
+          y:startY - (crit ? 18 : 12),
+          alpha:0,
+          duration:crit ? 760 : 520,
+          ease:'Quad.easeOut',
+          onComplete:() => t.destroy()
+        });
       }
 
       ectoplasmBurst(x, y, enemyClass) {
