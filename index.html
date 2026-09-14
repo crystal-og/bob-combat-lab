@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#111722" />
-  <title>Bob: Ghost Hunter — Combat Lab v0.2.5</title>
+  <title>Bob: Ghost Hunter — Combat Lab v0.2.6</title>
   <style>
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#0b0f16; }
     body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; touch-action:none; overscroll-behavior:none; }
@@ -524,7 +524,7 @@
         this.input.on('pointerdown', () => this.ensureAudio());
         this.cameras.main.scrollX = 0;
         this.cameras.main.scrollY = 0;
-        this.message('Combat Lab v0.2.5 — improved critical-hit feedback', 2400);
+        this.message('Combat Lab v0.2.6 — amplified Spectral Wand lightning', 2400);
       }
 
       makeTextures() {
@@ -741,7 +741,7 @@
       }
 
       createHUD() {
-        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2.5', {
+        this.titleUI = this.add.text(6, 5, 'BOB COMBAT LAB v0.2.6', {
           fontFamily:'monospace', fontSize:'8px', color:'#e7edf5', backgroundColor:'#101722cc', padding:{x:3,y:2}
         }).setScrollFactor(0).setDepth(1003);
 
@@ -1009,24 +1009,102 @@
           this.message('WAND: NO GHOSTS ON SCREEN', 650);
           return;
         }
+
         this.hasWand = false;
-        this.cameras.main.flash(180, 245, 245, 255, false);
-        this.cameras.main.shake(110, 0.006);
-        this.playTone(105, 0.12, 0.035, 'sawtooth');
-        this.time.delayedCall(70, () => this.playTone(720, 0.16, 0.025, 'square'));
+
+        // v0.2.6: make the Wand feel like a rare screen-clearing event, not just a damage pulse.
+        // Briefly darken the room so the lightning reads clearly, then hit each visible target.
+        const stormShade = this.add.rectangle(W / 2, H / 2, W, H, 0x211337, 0.48)
+          .setScrollFactor(0).setDepth(1030);
+        this.tweens.add({
+          targets: stormShade,
+          alpha: 0,
+          delay: 90,
+          duration: 240,
+          onComplete: () => stormShade.destroy()
+        });
+
+        this.cameras.main.shake(180, 0.009);
+        this.playTone(82, 0.16, 0.04, 'sawtooth');
+        this.time.delayedCall(70, () => {
+          this.cameras.main.flash(260, 238, 244, 255, false);
+          this.playTone(860, 0.12, 0.035, 'square');
+        });
+        this.time.delayedCall(150, () => this.playTone(410, 0.18, 0.025, 'sawtooth'));
+
+        const drawLightning = (enemy, index) => {
+          if (!enemy.aliveEnemy) return;
+
+          const crit = this.rollCrit('wand');
+          let base;
+          if (enemy.enemyClass === 'simple' || enemy.enemyClass === 'advanced') base = enemy.maxHp;
+          else base = enemy.maxHp * 0.5;
+          const amount = Math.round(base * (crit ? COMBAT.CRIT_MULT : 1));
+
+          const topY = view.y - 8;
+          const impactY = enemy.y - Math.max(2, enemy.displayHeight * 0.28);
+          const segments = 7;
+          const points = [{ x: enemy.x + Phaser.Math.Between(-4, 4), y: topY }];
+          for (let s = 1; s < segments; s++) {
+            const t = s / segments;
+            points.push({
+              x: enemy.x + Phaser.Math.Between(-11, 11),
+              y: Phaser.Math.Linear(topY, impactY, t)
+            });
+          }
+          points.push({ x: enemy.x, y: impactY });
+
+          const bolt = this.add.graphics().setDepth(38);
+          const strokePath = (width, color, alpha) => {
+            bolt.lineStyle(width, color, alpha);
+            bolt.beginPath();
+            bolt.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < points.length; i++) bolt.lineTo(points[i].x, points[i].y);
+            bolt.strokePath();
+          };
+          strokePath(9, 0x9c7cff, 0.24);
+          strokePath(4, 0xc8d8ff, 0.9);
+          strokePath(2, 0xffffff, 1);
+
+          // Short side branches make each strike read as lightning instead of a straight beam.
+          bolt.lineStyle(2, 0xe8edff, 0.9);
+          for (let b = 2; b < points.length - 1; b += 2) {
+            const p = points[b];
+            bolt.beginPath();
+            bolt.moveTo(p.x, p.y);
+            bolt.lineTo(p.x + Phaser.Math.Between(-14, 14), p.y + Phaser.Math.Between(6, 14));
+            bolt.strokePath();
+          }
+
+          const impact = this.add.circle(enemy.x, enemy.y, 7, 0xf7f5ff, 0.9).setDepth(39);
+          const ring = this.add.circle(enemy.x, enemy.y, 6, 0xb99cff, 0.12)
+            .setStrokeStyle(2, 0xe7dcff, 0.95).setDepth(37);
+
+          for (let i = 0; i < 10; i++) {
+            const spark = this.add.rectangle(enemy.x, enemy.y, 2, 2, i % 2 ? 0xffffff : 0xcab6ff, 1).setDepth(40);
+            const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
+            const dist = Phaser.Math.Between(12, 28);
+            this.tweens.add({
+              targets: spark,
+              x: enemy.x + Math.cos(angle) * dist,
+              y: enemy.y + Math.sin(angle) * dist,
+              alpha: 0,
+              duration: Phaser.Math.Between(180, 310),
+              onComplete: () => spark.destroy()
+            });
+          }
+
+          this.tweens.add({ targets: bolt, alpha: 0, duration: 260, onComplete: () => bolt.destroy() });
+          this.tweens.add({ targets: impact, scale: 2.8, alpha: 0, duration: 220, onComplete: () => impact.destroy() });
+          this.tweens.add({ targets: ring, scale: 3.6, alpha: 0, duration: 320, onComplete: () => ring.destroy() });
+
+          this.cameras.main.shake(90, 0.0045);
+          this.playTone(690 + index * 45, 0.08, 0.025, 'square');
+          enemy.takeDamage(amount, 'wand', crit, this.time.now);
+        };
+
         targets.forEach((enemy, index) => {
-          this.time.delayedCall(index * 35, () => {
-            if (!enemy.aliveEnemy) return;
-            const crit = this.rollCrit('wand');
-            let base;
-            if (enemy.enemyClass === 'simple' || enemy.enemyClass === 'advanced') base = enemy.maxHp;
-            else base = enemy.maxHp * 0.5;
-            const amount = Math.round(base * (crit ? COMBAT.CRIT_MULT : 1));
-            const bolt = this.add.rectangle(enemy.x, enemy.y - 55, 3, 95, 0xf3f0ff, 0.95).setDepth(35);
-            const glow = this.add.rectangle(enemy.x, enemy.y - 20, 9, 95, 0xb99cff, 0.28).setDepth(34);
-            this.tweens.add({ targets:[bolt, glow], alpha:0, duration:180, onComplete:()=>{ bolt.destroy(); glow.destroy(); } });
-            enemy.takeDamage(amount, 'wand', crit, this.time.now);
-          });
+          this.time.delayedCall(90 + index * 55, () => drawLightning(enemy, index));
         });
       }
 
